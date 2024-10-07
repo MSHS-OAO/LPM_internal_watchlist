@@ -1,44 +1,19 @@
-# GENERAL REMINDERS -------------------------------------------------------
-
-# 1. The outline can be customized based on project requirements.
-# 2. Sections may be added, removed, reordered, renamed, etc. as needed.
-# 3. Reference checklist for commenting and style guidelines
-# 4. Create Sections using the menu Code > Insert Section
-#    or the shortcut Ctrl+Shift+R
-# 5. Create subsections by starting a Section with two # signs (e.g. ##).  
-#    - See example within this section.
-
-
-## subsection example ----------------------------------------------------
-# The header for this section is an example of how to indent subsections by
-# adding an additional # symbol.
-
-
 # Libraries ---------------------------------------------------------------
-# Include all the packages that will be used throughout the code.
-# This is where packages can be installed if the user does not have them
-# currently installed.
-
-# Ensuring the appropriate package versions are used for the project based on
-# renv usage
-renv::restore()
-
 # Common Packages
 library(here)
 library(rmarkdown)
 library(shiny)
-
-# tidyverse includes: dplyr, ggplot2, lubridate, purrr, readr, readxl,
-# reprex, stringr, tidyr...and more
-# See this link for full list: https://tidyverse.tidyverse.org/
 library(tidyverse)
-
+library(rstudioapi)
+library(DBI)
+library(odbc)
+library(readr)
+library(dplyr)
 
 # Source Global Functions -------------------------------------------------
 # Source scripts that house global functions used within this script.
 # Global functions would include functions that are used regularly
 # throughout the rest of the script and should make code more readable.
-
 source()
 
 
@@ -46,6 +21,10 @@ source()
 # Define variables for frequently used root directories or full directories.
 # (This section could be combined with the Constants section.)
 # Reminder: avoid using setwd()
+#Read in Files-----------------------------------------------------------------
+dir_testing <- paste0("/SharedDrive/deans/Presidents/SixSigma/MSHS Productivity/",
+                        "Productivity/Analysis/Labor Metric Expansion and In-house Watchlist/Source Data/")
+setwd(dir_testing)
 
 ## Shared Drive Path (Generic) --------------------------------------------
 sdp <- paste0("//researchsan02b/shr2/deans/Presidents")
@@ -64,9 +43,6 @@ if ("Presidents" %in% list.files("J://")) {
   user_directory <- "J:/deans/Presidents/"
 }
 
-# an example project specific path that can be changed based on the project
-project_path <- paste0("/Operations Analytics and Optimization/Projects/",
-                       "Service Lines/Lab Kpi/Data/")
 
 # Here is the final path
 user_path <- paste0(user_directory, project_path,"*.*")
@@ -80,7 +56,23 @@ user_path <- paste0(user_directory, project_path,"*.*")
 # Data Import -------------------------------------------------------------
 # Importing data that is needed in the code whether it’s from the shared drive
 # or OneDrive or some other location.
+# Read in raw data 
+data <- read.csv(file.choose(), check.names = FALSE)
 
+#Checking column headers
+print(head(data))
+
+# Get the original column headers
+original_headers <- colnames(data)
+
+# Concatenate the original headers with the first row
+new_headers <- paste(original_headers, data[1, ], sep = " ")
+
+# Set the new headers as the column names
+colnames(data) <- new_headers
+
+# Remove the first row since it's now part of the headers
+data <- data[-1, ]
 
 # Data References ---------------------------------------------------------
 # (aka Mapping Tables)
@@ -93,7 +85,111 @@ user_path <- paste0(user_directory, project_path,"*.*")
 # It might make sense to keep these files in a separate file that is sourced
 # in the "Source Global Functions" section above.
 
+library(dplyr)
 
+# Average Function
+calculate_metric_averages <- function(data, metric) {
+  #trimming whitespace
+  colnames(data) <- trimws(colnames(data))
+  
+  #Check for columns with NA or empty string names and removes them
+  valid_columns <- !is.na(colnames(data)) & colnames(data) != ""
+  data <- data[, valid_columns]
+  
+  # Find columns that contain the specified metric
+  metric_columns <- names(data)[grepl(metric, names(data))]
+  
+  # Check if any metric columns were found
+  if (length(metric_columns) == 0) {
+    stop("The specified metric does not exist in the dataframe.")
+  }
+  
+  # Replace blanks with NA in the dataset
+  data[data == ""] <- NA
+  
+  # Select the last 3, 13, and 26 periods
+  n_periods <- c(3, 13, 26)
+  
+  # Create a list to hold averages for each period
+  averages <- list()
+  
+  for (n in n_periods) {
+    # Extract the last 'n' columns for the given metric
+    selected_columns <- tail(metric_columns, n) #Add in date component
+    
+    # Convert the columns to numeric (cleaning $ and commas)
+    data[selected_columns] <- lapply(data[selected_columns], function(x) {
+      as.numeric(gsub("[\\$,]", "", x))  # Remove $ and commas for numeric conversion
+    })
+    
+    # Calculate the mean for each period, skipping NA
+    mean_values <- data %>%
+      summarise(across(all_of(selected_columns), ~ mean(.x, na.rm = TRUE)))
+    
+    # Store the result in the list
+    averages[[paste("Average", n, "Periods")]] <- mean_values
+  }
+  
+  # Combine the results into a dataframe
+  return(bind_rows(averages))
+}
+
+# Example. User specifies metric. Can modify # of periods.
+metric_to_calculate <- "Actual Measure Amount"
+averages_result <- calculate_metric_averages(data, metric_to_calculate)
+
+print(averages_result)
+#-------------Testing-------------------
+# Median Function
+calculate_metric_medians <- function(data, metric) {
+  colnames(data) <- trimws(colnames(data))
+  
+  valid_columns <- !is.na(colnames(data)) & colnames(data) != ""
+  data <- data[, valid_columns]
+  
+  metric_columns <- names(data)[grepl(metric, names(data))]
+  
+  if (length(metric_columns) == 0) {
+    stop("The specified metric does not exist in the dataframe.")
+  }
+  
+  data[data == ""] <- NA
+  n_periods <- c(3, 13, 26)
+  
+  medians <- list()
+  
+  for (n in n_periods) {
+    selected_columns <- tail(metric_columns, n)
+    
+    data[selected_columns] <- lapply(data[selected_columns], function(x) {
+      as.numeric(gsub("[\\$,]", "", x))  # Remove $ and commas for numeric conversion (Can do this in pre-processing?)
+    })
+    
+    median_values <- data %>%
+      summarise(across(all_of(selected_columns), median, na.rm = TRUE))
+    
+    medians[[paste("Median", n, "Periods")]] <- median_values
+  }
+  
+  return(as.data.frame(medians))
+}
+
+#example
+metric_to_calculate <- "Overtime Hours"
+medians_result <- calculate_metric_medians(data, metric_to_calculate)
+
+print(medians_result)
+
+#---------Productivity Index Rolling Average Function----------------
+library(zoo)  # for rollapply
+
+
+# Function to clean column names
+clean_column_names <- function(data) {
+  colnames(data) <- make.names(colnames(data), unique = TRUE)  # Makes valid R names
+  colnames(data) <- gsub("\\.", " ", colnames(data))  # Replace dots with spaces
+  return(data)
+}
 # Data Pre-processing -----------------------------------------------------
 # Cleaning raw data and ensuring that all values are accounted for such as
 # blanks and NA. As well as excluding data that may not be used or needed. This
