@@ -51,6 +51,58 @@ user_path <- paste0(user_directory, project_path,"*.*")
 # Constants ---------------------------------------------------------------
 # Define constants that will be used throughout the code. These are the
 # variables that are calculated here and not changed in the rest of the code.
+#Pay Cycle from DB
+oao_con <- dbConnect(odbc(), "OAO Cloud DB Production")
+dates <- tbl(oao_con, "LPM_MAPPING_PAYCYCLE") %>%
+  rename(
+    DATE = PAYCYCLE_DATE,
+    START.DATE = PP_START_DATE,
+    END.DATE = PP_END_DATE,
+    PREMIER.DISTRIBUTION = PREMIER_DISTRIBUTION
+  ) %>%
+  collect()
+
+#Table of distribution dates
+dist_dates <- dates %>%
+  select(END.DATE, PREMIER.DISTRIBUTION) %>%
+  distinct() %>%
+  drop_na() %>%
+  arrange(END.DATE) %>%
+  #filter only on distribution end dates
+  filter(PREMIER.DISTRIBUTION %in% c(TRUE, 1),
+         #filter 3 weeks from run date (21 days) for data collection lag before run date
+         END.DATE < as.POSIXct(Sys.Date() - 21))
+#Table of non-distribution dates
+non_dist_dates <- dates %>%
+  select(END.DATE, PREMIER.DISTRIBUTION) %>%
+  distinct() %>%
+  drop_na() %>%
+  arrange(END.DATE) %>%
+  #filter only on distribution end dates
+  filter(PREMIER.DISTRIBUTION %in% c(FALSE, 0),
+         #filter 3 weeks from run date (21 days) for data collection lag before run date
+         END.DATE < as.POSIXct(Sys.Date() - 21))
+#Selecting current and previous distribution dates
+distribution <- format(dist_dates$END.DATE[nrow(dist_dates)],"%m/%d/%Y")
+previous_distribution <- format(dist_dates$END.DATE[nrow(dist_dates)-1],"%m/%d/%Y")
+#Confirming distribution dates
+cat("Current distribution is", distribution,
+    "\nPrevious distribution is", previous_distribution)
+answer <- select.list(choices = c("Yes", "No"),
+                      preselect = "Yes",
+                      multiple = F,
+                      title = "Correct distribution?",
+                      graphics = T)
+if (answer == "No") {
+  distribution <- select.list(choices =
+                                format(sort.POSIXlt(dist_dates$END.DATE, decreasing = T),
+                                       "%m/%d/%Y"),
+                              multiple = F,
+                              title = "Select current distribution",
+                              graphics = T)
+  which(distribution == format(dist_dates$END.DATE, "%m/%d/%Y"))
+  previous_distribution <- format(dist_dates$END.DATE[which(distribution == format(dist_dates$END.DATE, "%m/%d/%Y"))-1],"%m/%d/%Y")
+}
 
 
 # Data Import -------------------------------------------------------------
@@ -74,30 +126,106 @@ colnames(data) <- new_headers
 # Remove the first row since it's now part of the headers
 data <- data[-1, ]
 
+# Create a copy of the original data to modify
+cleaned_data <- data
+
+# Remove $ and , from all data while keeping column names the same
+cleaned_data[] <- lapply(cleaned_data, function(x) {
+  gsub("[$,]", "", x)  # Remove $ and , from each element
+})
+
+# Replace the original data with the cleaned data
+data <- cleaned_data
+
 # Data References ---------------------------------------------------------
 # (aka Mapping Tables)
 # Files that need to be imported for mappings and look-up tables.
 # (This section may be combined into the Data Import section.)
 
-
 # Creation of Functions --------------------------------------------------
 # These are functions that will be commonly used within the rest of the script.
 # It might make sense to keep these files in a separate file that is sourced
 # in the "Source Global Functions" section above.
-
 library(dplyr)
 
-# Average Function
-calculate_metric_averages <- function(data, metric) {
-  #trimming whitespace
+#function returns the values of the last 3, 13 and 26 pay periods
+old_calculate_metric_summary <- function(data, metric, summary_type = "mean") {
+  # Trim whitespace in column names
   colnames(data) <- trimws(colnames(data))
   
-  #Check for columns with NA or empty string names and removes them
+  # Remove columns with NA or empty string names
   valid_columns <- !is.na(colnames(data)) & colnames(data) != ""
   data <- data[, valid_columns]
   
-  # Find columns that contain the specified metric
-  metric_columns <- names(data)[grepl(metric, names(data))]
+  # Find columns that contain the specified metric at the end of the column name
+  metric_columns <- names(data)[grepl(paste0(" ", metric, "$"), names(data))]
+  
+  # Check if any metric columns were found
+  if (length(metric_columns) == 0) {
+    stop("The specified metric does not exist in the dataframe.")
+  }
+  data[data == ""] <- NA
+  n_periods <- c(3, 13, 26)
+  summaries <- list()
+  
+  # Group by Department
+  data_grouped <- data %>%
+    group_by(Department)
+  
+  for (n in n_periods) {
+    # Extract the last n columns for the given metric
+    selected_columns <- tail(metric_columns, n)
+    
+    # Convert the columns to numeric (cleaning $ and commas)
+    data_grouped[selected_columns] <- lapply(data_grouped[selected_columns], function(x) {
+      as.numeric(gsub("[\\$,]", "", x))  # Remove $ and commas for numeric conversion
+    })
+    
+    # Calculate the summary (mean or median) for each department and each period, skipping NA
+    summary_values <- data_grouped %>%
+      summarise(across(all_of(selected_columns), 
+                       function(x) {
+                         if (summary_type == "mean") {
+                           mean(x, na.rm = TRUE)
+                         } else if (summary_type == "median") {
+                           median(x, na.rm = TRUE)
+                         } else {
+                           stop("Invalid summary type. Choose 'mean' or 'median'.")
+                         }
+                       }, 
+                       .names = "{.col}_{.fn}")) %>%
+      ungroup()
+    
+    # Store the result in the list with appropriate labeling
+    summaries[[paste(summary_type, n, "Periods")]] <- summary_values
+  }
+  
+  # Combine the results into a dataframe
+  return(bind_rows(summaries))
+}
+
+# Example usage for averages
+metric_to_calculate <- "Actual Measure Amount"
+averages_result <- old_calculate_metric_summary(data, metric_to_calculate, summary_type = "mean")
+print(averages_result)
+
+# Example usage for medians
+medians_result <- old_calculate_metric_summary(data, metric_to_calculate, summary_type = "median")
+print(medians_result)
+
+library(dplyr)
+#Function to calculate average of last 3, 13 and 26 pay periods. User specifies the metric.
+#Add in department ID/code. Add with report builder if possible
+calculate_metric_summary <- function(data, metric, summary_type = "mean") {
+  # Trim whitespace in column names
+  colnames(data) <- trimws(colnames(data))
+  
+  # Remove columns with NA or empty string names
+  valid_columns <- !is.na(colnames(data)) & colnames(data) != ""
+  data <- data[, valid_columns]
+  
+  # Find columns that contain the specified metric at the end of the column name
+  metric_columns <- names(data)[grepl(paste0(" ", metric, "$"), names(data))]
   
   # Check if any metric columns were found
   if (length(metric_columns) == 0) {
@@ -107,82 +235,48 @@ calculate_metric_averages <- function(data, metric) {
   # Replace blanks with NA in the dataset
   data[data == ""] <- NA
   
-  # Select the last 3, 13, and 26 periods
+  # Define periods to calculate (last 3, 13, and 26 periods)
   n_periods <- c(3, 13, 26)
   
-  # Create a list to hold averages for each period
-  averages <- list()
+  # Group by Department
+  data_grouped <- data %>% group_by(Department)
   
-  for (n in n_periods) {
-    # Extract the last 'n' columns for the given metric
-    selected_columns <- tail(metric_columns, n) #Add in date component
-    
-    # Convert the columns to numeric (cleaning $ and commas)
-    data[selected_columns] <- lapply(data[selected_columns], function(x) {
-      as.numeric(gsub("[\\$,]", "", x))  # Remove $ and commas for numeric conversion
-    })
-    
-    # Calculate the mean for each period, skipping NA
-    mean_values <- data %>%
-      summarise(across(all_of(selected_columns), ~ mean(.x, na.rm = TRUE)))
-    
-    # Store the result in the list
-    averages[[paste("Average", n, "Periods")]] <- mean_values
-  }
+  # Calculate summaries for each department based on the chosen summary type
+  summary_values <- data_grouped %>% summarise(
+    Average_Last_3_Periods = if (summary_type == "mean") {
+      mean(as.numeric(unlist(select(cur_data(), tail(metric_columns, 3)))), na.rm = TRUE)
+    } else if (summary_type == "median") {
+      median(as.numeric(unlist(select(cur_data(), tail(metric_columns, 3)))), na.rm = TRUE)
+    },
+    Average_Last_13_Periods = if (summary_type == "mean") {
+      mean(as.numeric(unlist(select(cur_data(), tail(metric_columns, 13)))), na.rm = TRUE)
+    } else if (summary_type == "median") {
+      median(as.numeric(unlist(select(cur_data(), tail(metric_columns, 13)))), na.rm = TRUE)
+    },
+    Average_Last_26_Periods = if (summary_type == "mean") {
+      mean(as.numeric(unlist(select(cur_data(), tail(metric_columns, 26)))), na.rm = TRUE)
+    } else if (summary_type == "median") {
+      median(as.numeric(unlist(select(cur_data(), tail(metric_columns, 26)))), na.rm = TRUE)
+    },
+    .groups = "drop"
+  )
   
-  # Combine the results into a dataframe
-  return(bind_rows(averages))
+  return(summary_values)
 }
 
-# Example. User specifies metric. Can modify # of periods.
-metric_to_calculate <- "Actual Measure Amount"
-averages_result <- calculate_metric_averages(data, metric_to_calculate)
-
+# Example usage for averages
+metric_to_calculate <- "Overtime Labor Expense"
+averages_result_V2 <- calculate_metric_summary(data, metric_to_calculate, summary_type = "mean")
 print(averages_result)
-#-------------Testing-------------------
-# Median Function
-calculate_metric_medians <- function(data, metric) {
-  colnames(data) <- trimws(colnames(data))
-  
-  valid_columns <- !is.na(colnames(data)) & colnames(data) != ""
-  data <- data[, valid_columns]
-  
-  metric_columns <- names(data)[grepl(metric, names(data))]
-  
-  if (length(metric_columns) == 0) {
-    stop("The specified metric does not exist in the dataframe.")
-  }
-  
-  data[data == ""] <- NA
-  n_periods <- c(3, 13, 26)
-  
-  medians <- list()
-  
-  for (n in n_periods) {
-    selected_columns <- tail(metric_columns, n)
-    
-    data[selected_columns] <- lapply(data[selected_columns], function(x) {
-      as.numeric(gsub("[\\$,]", "", x))  # Remove $ and commas for numeric conversion (Can do this in pre-processing?)
-    })
-    
-    median_values <- data %>%
-      summarise(across(all_of(selected_columns), median, na.rm = TRUE))
-    
-    medians[[paste("Median", n, "Periods")]] <- median_values
-  }
-  
-  return(as.data.frame(medians))
-}
 
-#example
-metric_to_calculate <- "Overtime Hours"
-medians_result <- calculate_metric_medians(data, metric_to_calculate)
-
+# Example usage for medians
+medians_result_V2 <- calculate_metric_summary(data, metric_to_calculate, summary_type = "median")
 print(medians_result)
 
+OT_hours_averages_result <- calculate_metric_summary_averages(data, metric_to_calculate, summary_type = "mean")
+OT_LE_averages_result <- calculate_metric_summary_averages(data, metric_to_calculate, summary_type = "mean")
 #---------Productivity Index Rolling Average Function----------------
 library(zoo)  # for rollapply
-
 
 # Function to clean column names
 clean_column_names <- function(data) {
@@ -190,6 +284,8 @@ clean_column_names <- function(data) {
   colnames(data) <- gsub("\\.", " ", colnames(data))  # Replace dots with spaces
   return(data)
 }
+
+
 # Data Pre-processing -----------------------------------------------------
 # Cleaning raw data and ensuring that all values are accounted for such as
 # blanks and NA. As well as excluding data that may not be used or needed. This
