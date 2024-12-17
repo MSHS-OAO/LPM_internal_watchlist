@@ -11,102 +11,28 @@ library(readr)
 library(dplyr)
 library(purrr)
 library(tidyr)
-
-# Source Global Functions -------------------------------------------------
-source()
+library(readxl)
+library(writexl)
 
 # Assigning Directory(ies) ------------------------------------------------
-# Define variables for frequently used root directories or full directories.
 #Read in Files-----------------------------------------------------------------
 dir_testing <- paste0("/SharedDrive/deans/Presidents/SixSigma/MSHS Productivity/",
-                        "Productivity/Analysis/Labor Metric Expansion and In-house Watchlist/Source Data/")
+                        "Productivity/Analysis/Labor Metric Expansion and In-house Watchlist")
 setwd(dir_testing)
 
-## Shared Drive Path (Generic) --------------------------------------------
-sdp <- paste0("//researchsan02b/shr2/deans/Presidents")
-J_drive <- paste0("//researchsan02b/shr2/deans/Presidents")
-
-## J-drive Automatic Check ------------------------------------------------
-# Alternative mapping of the Windows Shared Drive using the drive letter
-# and an if-else check.
-# This code helps when the shared folder is mapped differently for different
-# users.
-# This code tests whether a user has the J drive mapped to Presidents or
-# deans
-if ("Presidents" %in% list.files("J://")) {
-  user_directory <- "J:/Presidents/"
-} else {
-  user_directory <- "J:/deans/Presidents/"
-}
-
-# Here is the final path
-user_path <- paste0(user_directory, project_path,"*.*")
-
 # Constants ---------------------------------------------------------------
-# Define constants that will be used throughout the code. These are the
-# variables that are calculated here and not changed in the rest of the code.
-#Pay Cycle from DB
-oao_con <- dbConnect(odbc(), "OAO Cloud DB Production")
-dates <- tbl(oao_con, "LPM_MAPPING_PAYCYCLE") %>%
-  rename(
-    DATE = PAYCYCLE_DATE,
-    START.DATE = PP_START_DATE,
-    END.DATE = PP_END_DATE,
-    PREMIER.DISTRIBUTION = PREMIER_DISTRIBUTION
-  ) %>%
-  collect()
-
-#Table of distribution dates
-dist_dates <- dates %>%
-  select(END.DATE, PREMIER.DISTRIBUTION) %>%
-  distinct() %>%
-  drop_na() %>%
-  arrange(END.DATE) %>%
-  #filter only on distribution end dates
-  filter(PREMIER.DISTRIBUTION %in% c(TRUE, 1),
-         #filter 3 weeks from run date (21 days) for data collection lag before run date
-         END.DATE < as.POSIXct(Sys.Date() - 21))
-#Table of non-distribution dates
-non_dist_dates <- dates %>%
-  select(END.DATE, PREMIER.DISTRIBUTION) %>%
-  distinct() %>%
-  drop_na() %>%
-  arrange(END.DATE) %>%
-  #filter only on distribution end dates
-  filter(PREMIER.DISTRIBUTION %in% c(FALSE, 0),
-         #filter 3 weeks from run date (21 days) for data collection lag before run date
-         END.DATE < as.POSIXct(Sys.Date() - 21))
-#Selecting current and previous distribution dates
-distribution <- format(dist_dates$END.DATE[nrow(dist_dates)],"%m/%d/%Y")
-previous_distribution <- format(dist_dates$END.DATE[nrow(dist_dates)-1],"%m/%d/%Y")
-#Confirming distribution dates
-cat("Current distribution is", distribution,
-    "\nPrevious distribution is", previous_distribution)
-answer <- select.list(choices = c("Yes", "No"),
-                      preselect = "Yes",
-                      multiple = F,
-                      title = "Correct distribution?",
-                      graphics = T)
-if (answer == "No") {
-  distribution <- select.list(choices =
-                                format(sort.POSIXlt(dist_dates$END.DATE, decreasing = T),
-                                       "%m/%d/%Y"),
-                              multiple = F,
-                              title = "Select current distribution",
-                              graphics = T)
-  which(distribution == format(dist_dates$END.DATE, "%m/%d/%Y"))
-  previous_distribution <- format(dist_dates$END.DATE[which(distribution == format(dist_dates$END.DATE, "%m/%d/%Y"))-1],"%m/%d/%Y")
-}
-
 
 # Data Import -------------------------------------------------------------
-# Importing data that is needed in the code whether it’s from the shared drive
-# or OneDrive or some other location.
+#Reporting definitions from DB
+oao_con <- dbConnect(odbc(), "OAO Cloud DB Production")
+rep_def <- tbl(oao_con, "LPM_MAPPING_REPDEF") %>%
+  collect()
+# Read in the static and entity volume department Excel files
+static_vol_deps <- read_excel(file.path(dir_testing, "Static Volume Departments.xlsx"))
+entity_vol_deps <- read_excel(file.path(dir_testing, "Entity Volume Departments.xlsx"))
+
 # Read in raw data 
 data <- read.csv(file.choose(), check.names = FALSE)
-
-#Checking column headers
-print(head(data))
 
 # Get the original column headers
 original_headers <- colnames(data)
@@ -128,6 +54,9 @@ cleaned_data[] <- lapply(cleaned_data, function(x) {
   gsub("[$,%]", "", x)
 })
 
+# Create a new data frame with only the Department DESC and Department CODE columns
+department_data <- cleaned_data[, c("Department CODE  ", "Department DESC  ")]
+
 # Replace the original data with the cleaned data
 data <- cleaned_data
 # Data References ---------------------------------------------------------
@@ -137,7 +66,6 @@ data <- cleaned_data
 
 # Creation of Functions --------------------------------------------------
 #Function to calculate average of last 3, 13 and 26 pay periods. User specifies the metric.
-#Add in department ID/code. Add with report builder if possible
 calculate_metric_summary <- function(data, metric, summary_type = "mean") {
   # Trim whitespace in column names
   colnames(data) <- trimws(colnames(data))
@@ -228,6 +156,291 @@ calculate_metric_correlation <- function(data, metric1, metric2) {
   
   return(correlation_result)
 }
+
+# Function to calculate the linear regression slope of Worked Hours Productivity Index
+calculate_slope <- function(data, metric) {
+  # Trim whitespace in column names
+  colnames(data) <- trimws(colnames(data))
+  
+  # Remove columns with NA or empty string names
+  valid_columns <- !is.na(colnames(data)) & colnames(data) != ""
+  data <- data[, valid_columns]
+  
+  # Find columns that contain the specified metric at the end of the column name
+  metric_columns <- names(data)[grepl(paste0(" ", metric, "$"), names(data))]
+  
+  # Check if any metric columns were found
+  if (length(metric_columns) == 0) {
+    stop("The specified metric does not exist in the dataframe.")
+  }
+  
+  # Replace blanks with NA in the dataset
+  data[data == ""] <- NA
+  
+  # Define periods to calculate (last 3, 13, and 26 periods)
+  n_periods <- c(3, 13, 26)
+  
+  # Function to calculate slope
+  calculate_slope <- function(x) {
+    valid_values <- x[!is.na(x) & x != 0]
+    if (length(valid_values) < 2) return(NA) # Not enough data to calculate slope
+    return(lm(valid_values ~ seq_along(valid_values))$coefficients[2]) # Slope calculation
+  }
+  
+  # Group by Department
+  data_grouped <- data %>% group_by(`Department CODE`)
+  
+  # Calculate slopes for each department based on the chosen metric
+  slopes <- data_grouped %>% summarise(
+    Slope_Last_3_Periods = calculate_slope(as.numeric(unlist(select(cur_data(), tail(metric_columns, 3))))),
+    Slope_Last_13_Periods = calculate_slope(as.numeric(unlist(select(cur_data(), tail(metric_columns, 13))))),
+    Slope_Last_26_Periods = calculate_slope(as.numeric(unlist(select(cur_data(), tail(metric_columns, 26))))),
+    .groups = "drop"
+  )
+  
+  return(slopes)
+}
+
+# Function to calculate the linear regression equation for any given metric
+calculate_regression_equation <- function(data, metric_name = "Worked Hours Productivity Index") {
+  # Trim whitespace in column names
+  colnames(data) <- trimws(colnames(data))
+  
+  # Filter columns with the specified metric name at the end
+  metric_columns <- names(data)[grepl(paste0(" ", metric_name, "$"), names(data))]
+  
+  # Sort metric columns by date to ensure chronological order
+  metric_columns <- sort(metric_columns)
+  
+  # Group data by Department CODE and calculate slope and intercept for each time period
+  regression_equations <- data %>% group_by(`Department CODE`) %>% summarise(
+    Regression_Last_3_Periods = {
+      y <- as.numeric(unlist(select(cur_data(), tail(metric_columns, 3))))
+      x <- seq_along(y)
+      if (length(na.omit(y)) >= 2) {
+        lm_fit <- lm(y ~ x)
+        intercept <- coef(lm_fit)[1]
+        slope <- coef(lm_fit)[2]
+        paste0("y = ", round(intercept, 3), " + ", round(slope, 3), " * x")
+      } else {
+        NA
+      }
+    },
+    Regression_Last_13_Periods = {
+      y <- as.numeric(unlist(select(cur_data(), tail(metric_columns, 13))))
+      x <- seq_along(y)
+      if (length(na.omit(y)) >= 2) {
+        lm_fit <- lm(y ~ x)
+        intercept <- coef(lm_fit)[1]
+        slope <- coef(lm_fit)[2]
+        paste0("y = ", round(intercept, 3), " + ", round(slope, 3), " * x")
+      } else {
+        NA
+      }
+    },
+    Regression_Last_26_Periods = {
+      y <- as.numeric(unlist(select(cur_data(), tail(metric_columns, 26))))
+      x <- seq_along(y)
+      if (length(na.omit(y)) >= 2) {
+        lm_fit <- lm(y ~ x)
+        intercept <- coef(lm_fit)[1]
+        slope <- coef(lm_fit)[2]
+        paste0("y = ", round(intercept, 3), " + ", round(slope, 3), " * x")
+      } else {
+        NA
+      }
+    },
+    .groups = "drop"
+  )
+  
+  return(regression_equations)
+}
+
+calculate_intercept <- function(data, metric) {
+  # Trim whitespace in column names
+  colnames(data) <- trimws(colnames(data))
+  
+  # Remove columns with NA or empty string names
+  valid_columns <- !is.na(colnames(data)) & colnames(data) != ""
+  data <- data[, valid_columns]
+  
+  # Find columns that contain the specified metric at the end of the column name
+  metric_columns <- names(data)[grepl(paste0(" ", metric, "$"), names(data))]
+  
+  # Check if any metric columns were found
+  if (length(metric_columns) == 0) {
+    stop("The specified metric does not exist in the dataframe.")
+  }
+  
+  # Replace blanks with NA in the dataset
+  data[data == ""] <- NA
+  
+  # Define periods to calculate (last 3, 13, and 26 periods)
+  n_periods <- c(3, 13, 26)
+  
+  # Function to calculate y-intercept
+  calculate_intercept <- function(x) {
+    valid_values <- x[!is.na(x) & x != 0]
+    if (length(valid_values) < 2) return(NA) # Not enough data to calculate intercept
+    model <- lm(valid_values ~ seq_along(valid_values))
+    return(model$coefficients[1]) # Intercept calculation
+  }
+  
+  # Group by Department
+  data_grouped <- data %>% group_by(`Department CODE`)
+  
+  # Calculate intercepts for each department based on the chosen metric
+  intercepts <- data_grouped %>% summarise(
+    Intercept_Last_3_Periods = calculate_intercept(as.numeric(unlist(select(cur_data(), tail(metric_columns, 3))))),
+    Intercept_Last_13_Periods = calculate_intercept(as.numeric(unlist(select(cur_data(), tail(metric_columns, 13))))),
+    Intercept_Last_26_Periods = calculate_intercept(as.numeric(unlist(select(cur_data(), tail(metric_columns, 26))))),
+    .groups = "drop"
+  )
+  
+  return(intercepts)
+}
+
+# Function to calculate only the y-intercept (OLD)
+calculate_intercept_old <- function(data, metric_name = "Worked Hours Productivity Index") {
+  # Trim whitespace in column names
+  colnames(data) <- trimws(colnames(data))
+  
+  metric_columns <- names(data)[grepl(paste0(" ", metric_name, "$"), names(data))]
+  
+  # Sort metric columns by date to ensure chronological order
+  metric_columns <- sort(metric_columns)
+  
+  # Group data by Department CODE and calculate intercept for each time period
+  intercepts <- data %>% group_by(`Department CODE`) %>% summarise(
+    Intercept_Last_3_Periods = {
+      y <- as.numeric(unlist(select(cur_data(), tail(metric_columns, 3))))
+      x <- seq_along(y)
+      if (length(na.omit(y)) >= 2) coef(lm(y ~ x))[1] else NA
+    },
+    Intercept_Last_13_Periods = {
+      y <- as.numeric(unlist(select(cur_data(), tail(metric_columns, 13))))
+      x <- seq_along(y)
+      if (length(na.omit(y)) >= 2) coef(lm(y ~ x))[1] else NA
+    },
+    Intercept_Last_26_Periods = {
+      y <- as.numeric(unlist(select(cur_data(), tail(metric_columns, 26))))
+      x <- seq_along(y)
+      if (length(na.omit(y)) >= 2) coef(lm(y ~ x))[1] else NA
+    },
+    .groups = "drop"
+  )
+  
+  return(intercepts)
+}
+
+#Function to calculate standard deviation
+calculate_metric_sd <- function(data, metric) {
+  
+  colnames(data) <- trimws(colnames(data))
+  
+  # Find columns for the specified metric
+  metric_columns <- names(data)[grepl(paste0(" ", metric, "$"), names(data))]
+  
+  # Replace blanks with NA
+  data[data == ""] <- NA
+  
+  # Group by Department CODE and calculate the standard deviation for the last 3, 13, and 26 periods
+  sd_result <- data %>%
+    group_by(`Department CODE`) %>%
+    summarise(
+      SD_Last_3_Periods = sd(as.numeric(unlist(select(cur_data(), tail(metric_columns, 3)))), na.rm = TRUE),
+      SD_Last_13_Periods = sd(as.numeric(unlist(select(cur_data(), tail(metric_columns, 13)))), na.rm = TRUE),
+      SD_Last_26_Periods = sd(as.numeric(unlist(select(cur_data(), tail(metric_columns, 26)))), na.rm = TRUE),
+      .groups = "drop"
+    )
+  
+  return(sd_result)
+}
+
+#Min Max and Range function
+calculate_metric_min_max_range <- function(data, metric) {
+  
+  colnames(data) <- trimws(colnames(data))
+  
+  # Find columns for the specified metric
+  metric_columns <- names(data)[grepl(paste0(" ", metric, "$"), names(data))]
+  
+  # Replace blanks with NA
+  data[data == ""] <- NA
+  
+  # Group by Department CODE and calculate the min, max, and range for the last 3, 13, and 26 periods
+  min_max_range_result <- data %>%
+    group_by(`Department CODE`) %>%
+    summarise(
+      Min_Last_3_Periods = min(as.numeric(unlist(select(cur_data(), tail(metric_columns, 3)))), na.rm = TRUE),
+      Max_Last_3_Periods = max(as.numeric(unlist(select(cur_data(), tail(metric_columns, 3)))), na.rm = TRUE),
+      Range_Last_3_Periods = Max_Last_3_Periods - Min_Last_3_Periods,
+      
+      Min_Last_13_Periods = min(as.numeric(unlist(select(cur_data(), tail(metric_columns, 13)))), na.rm = TRUE),
+      Max_Last_13_Periods = max(as.numeric(unlist(select(cur_data(), tail(metric_columns, 13)))), na.rm = TRUE),
+      Range_Last_13_Periods = Max_Last_13_Periods - Min_Last_13_Periods,
+      
+      Min_Last_26_Periods = min(as.numeric(unlist(select(cur_data(), tail(metric_columns, 26)))), na.rm = TRUE),
+      Max_Last_26_Periods = max(as.numeric(unlist(select(cur_data(), tail(metric_columns, 26)))), na.rm = TRUE),
+      Range_Last_26_Periods = Max_Last_26_Periods - Min_Last_26_Periods,
+      
+      .groups = "drop"
+    )
+  
+  return(min_max_range_result)
+}
+
+#Percentile Function
+calculate_metric_percentiles <- function(data, metric, lower_percentile = 0.25, upper_percentile = 0.75) {
+  
+  colnames(data) <- trimws(colnames(data))
+  
+  # Find columns for the specified metric
+  metric_columns <- names(data)[grepl(paste0(" ", metric, "$"), names(data))]
+  
+  # Replace blanks with NA
+  data[data == ""] <- NA
+  
+  # Group by Department CODE and calculate the percentiles and spread for the last 3, 13, and 26 periods
+  percentile_result <- data %>% 
+    group_by(`Department CODE`) %>% 
+    summarise(
+      Percentile_Last_3_Periods_Lower = quantile(as.numeric(unlist(select(cur_data(), tail(metric_columns, 3)))), probs = lower_percentile, na.rm = TRUE),
+      Percentile_Last_3_Periods_Upper = quantile(as.numeric(unlist(select(cur_data(), tail(metric_columns, 3)))), probs = upper_percentile, na.rm = TRUE),
+      Spread_Last_3_Periods = Percentile_Last_3_Periods_Upper - Percentile_Last_3_Periods_Lower,
+      
+      Percentile_Last_13_Periods_Lower = quantile(as.numeric(unlist(select(cur_data(), tail(metric_columns, 13)))), probs = lower_percentile, na.rm = TRUE),
+      Percentile_Last_13_Periods_Upper = quantile(as.numeric(unlist(select(cur_data(), tail(metric_columns, 13)))), probs = upper_percentile, na.rm = TRUE),
+      Spread_Last_13_Periods = Percentile_Last_13_Periods_Upper - Percentile_Last_13_Periods_Lower,
+      
+      Percentile_Last_26_Periods_Lower = quantile(as.numeric(unlist(select(cur_data(), tail(metric_columns, 26)))), probs = lower_percentile, na.rm = TRUE),
+      Percentile_Last_26_Periods_Upper = quantile(as.numeric(unlist(select(cur_data(), tail(metric_columns, 26)))), probs = upper_percentile, na.rm = TRUE),
+      Spread_Last_26_Periods = Percentile_Last_26_Periods_Upper - Percentile_Last_26_Periods_Lower,
+      
+      .groups = "drop"
+    )
+  
+  return(percentile_result)
+}
+
+# Function to rename columns for each metric data frame
+rename_columns <- function(df, metric) {
+  if (grepl("min_max_range", metric)) {
+    # Rename for metrics with min, max, and range components (including percentiles)
+    colnames(df)[2:10] <- paste(metric, c("Min_3_Periods", "Max_3_Periods", "Range_3_Periods", 
+                                          "Min_13_Periods", "Max_13_Periods", "Range_13_Periods",
+                                          "Min_26_Periods", "Max_26_Periods", "Range_26_Periods"), sep = "_")
+  } else if (grepl("percentiles", metric)) {
+    # Rename for percentiles metrics to include Min, Max, and Range for each period
+    colnames(df)[2:10] <- paste(metric, c("Percentile_Lower_3_Periods", "Percentile_Upper_3_Periods", "Spread_3_Periods", 
+                                          "Percentile_Lower_13_Periods", "Percentile_Upper_13_Periods", "Spread_13_Periods",
+                                          "Percentile_Lower_26_Periods", "Percentile_Upper_26_Periods", "Spread_26_Periods"), sep = "_")
+  } else {
+    # Rename for regular metrics
+    colnames(df)[2:4] <- paste(metric, c("3_Periods", "13_Periods", "26_Periods"), sep = "_")
+  }
+  return(df)
+}
 #---------Applying function to calculate individual metrics---------------
 # Premium Pay Spend average (OT + Agency)
 Premium_Pay_avg <- calculate_metric_summary(data, "Premium Pay Expense", summary_type = "mean")
@@ -251,12 +464,9 @@ Worked_LE_avg <- calculate_metric_summary(data, "Worked Expenses", summary_type 
 Premium_Pay_pct_Worked_LE_avg <- Premium_Pay_avg %>%
   inner_join(Worked_LE_avg, by = "Department CODE") %>%
   mutate(
-    Premium_Pay_Percentage_3_Periods = sprintf("%.2f%%", 
-                                               (Average_Last_3_Periods.x / Average_Last_3_Periods.y) * 100),
-    Premium_Pay_Percentage_13_Periods = sprintf("%.2f%%", 
-                                                (Average_Last_13_Periods.x / Average_Last_13_Periods.y) * 100),
-    Premium_Pay_Percentage_26_Periods = sprintf("%.2f%%", 
-                                                (Average_Last_26_Periods.x / Average_Last_26_Periods.y) * 100)
+    Premium_Pay_Percentage_3_Periods = round((Average_Last_3_Periods.x / Average_Last_3_Periods.y) * 100, 2),
+    Premium_Pay_Percentage_13_Periods = round((Average_Last_13_Periods.x / Average_Last_13_Periods.y) * 100, 2),
+    Premium_Pay_Percentage_26_Periods = round((Average_Last_26_Periods.x / Average_Last_26_Periods.y) * 100, 2)
   ) %>%
   select(`Department CODE`, starts_with("Premium_Pay_Percentage"))
 
@@ -267,12 +477,9 @@ Premium_Pay_pct_Worked_LE_med <- calculate_metric_summary(data, "Premium Pay % o
 OT_Pay_pct_Worked_LE_avg <- OT_expense_avg %>%
   inner_join(Worked_LE_avg, by = "Department CODE") %>%
   mutate(
-    OT_Pay_Percentage_3_Periods = sprintf("%.2f%%", 
-                                               (Average_Last_3_Periods.x / Average_Last_3_Periods.y) * 100),
-    OT_Pay_Percentage_13_Periods = sprintf("%.2f%%", 
-                                                (Average_Last_13_Periods.x / Average_Last_13_Periods.y) * 100),
-    OT_Pay_Percentage_26_Periods = sprintf("%.2f%%", 
-                                                (Average_Last_26_Periods.x / Average_Last_26_Periods.y) * 100)
+    OT_Pay_Percentage_3_Periods = round((Average_Last_3_Periods.x / Average_Last_3_Periods.y) * 100, 2),
+    OT_Pay_Percentage_13_Periods = round((Average_Last_13_Periods.x / Average_Last_13_Periods.y) * 100, 2),
+    OT_Pay_Percentage_26_Periods = round((Average_Last_26_Periods.x / Average_Last_26_Periods.y) * 100, 2)
   ) %>%
   select(`Department CODE`, starts_with("OT_Pay_Percentage"))
 
@@ -290,6 +497,9 @@ LE_Variance_med <- calculate_metric_summary(data, "Labor Expense Variance", summ
 
 #FTE Variance Median
 FTE_Variance_med <- calculate_metric_summary(data, "Worked FTE Variance", summary_type = "median")
+
+#Premium Pay Variance Median
+Premium_Pay_Variance_med <- calculate_metric_summary(data, "Premium Pay Variance", summary_type = "median")
 
 #Worked FTE Average
 Worked_FTE_avg <- calculate_metric_summary(data, "Worked FTE", summary_type = "mean")
@@ -348,15 +558,34 @@ LE_Variance_avg <- Worked_LE_avg %>%
 
 # Correlation Coefficient (Staffing to Volume)
 correlation_result <- calculate_metric_correlation(data, "Actual Measure Amount", "Actual Worked Hours")
-# Data Pre-processing -----------------------------------------------------
-# Cleaning raw data and ensuring that all values are accounted for such as
-# blanks and NA. As well as excluding data that may not be used or needed. This
-# section can be split into multiple ones based on the data pre-processing
-# needed.
-# One of the first steps could be to perform initial checks to make sure data is
-# in the correct format.  This might also be done as soon as the data is
-# imported.
 
+# Apply function to calculate the slope for Worked Hours Productivity Index
+Worked_Hours_Prod_Slope <- calculate_slope(data, "Worked Hours Productivity Index")
+LE_Index_Slope <- calculate_slope(data, "Labor Expense Index")
+
+# Apply function to calculate the linear regression equations for Worked Hours Productivity Index
+Worked_Hours_PI_Regressions <- calculate_regression_equation(data, "Worked Hours Productivity Index")
+LE_PI_Regressions <- calculate_regression_equation(data, "Labor Expense Index")
+
+# Apply y intercept function
+Worked_Hours_PI_Intercepts <- calculate_intercept(data, "Worked Hours Productivity Index")
+LE_PI_Intercepts <- calculate_intercept(data, "Labor Expense Index")
+
+#Applying standard deviation function
+PI_stdv <- calculate_metric_sd(data, "Worked Hours Productivity Index")
+LE_stdv <- calculate_metric_sd(data, "Labor Expense Index")
+FTE_Variance_stdv <- calculate_metric_sd(data, "FTE Variance")
+LE_Variance_stdv <- calculate_metric_sd(data, "Labor Expense Variance")
+
+#Applying min max and range function
+PI_min_max_range <- calculate_metric_min_max_range(data, "Worked Hours Productivity Index")
+LE_min_max_range <- calculate_metric_min_max_range(data, "Labor Expense Index")
+FTE_Variance_min_max_range <- calculate_metric_min_max_range(data, "FTE Variance")
+LE_Variance_min_max_range <- calculate_metric_min_max_range(data, "Labor Expense Variance")
+
+#Applying percentile function
+PI_percentiles <- calculate_metric_percentiles(data, "Worked Hours Productivity Index", 0.10, 0.90) # Example for 10th and 90th percentiles
+LE_percentiles <- calculate_metric_percentiles(data, "Labor Expense Index", 0.20, 0.80) # Example for 20th and 80th percentiles
 
 # Data Formatting ---------------------------------------------------------
 # How the data will look during the output of the script.
@@ -368,41 +597,40 @@ correlation_result <- calculate_metric_correlation(data, "Actual Measure Amount"
 # Checks that are performed on the output to confirm data consistency and
 
 
-
 # Visualization -----------------------------------------------------------
 # How the data will be plotted or how the data table will look including axis
 # titles, scales, and color schemes of graphs or data tables.
 
-# List of relevant data frames to combine
+# Updated list of relevant data frames to combine, including new data frames
 dfs <- list(
   Worked_FTE_avg, Paid_LE_avg, Target_Worked_FTE_avg, Target_LE_avg,
   Productivity_Index_avg, FTE_Variance_avg, LE_Index_avg, LE_Variance_avg,
   Premium_Pay_avg, Premium_Pay_pct_Worked_LE_avg, OT_expense_avg, 
-  OT_Pay_pct_Worked_LE_avg, Productivity_Index_med, FTE_Variance_med, 
-  LE_Index_med, LE_Variance_med, Premium_Pay_med, 
+  OT_Pay_pct_Worked_LE_avg, Productivity_Index_med, FTE_Variance_med,
+  Premium_Pay_Variance_med, LE_Index_med, LE_Variance_med, Premium_Pay_med, 
   Premium_Pay_pct_Worked_LE_med, OT_expense_med, OT_Pay_pct_Worked_LE_med, 
-  correlation_result
+  correlation_result, Worked_Hours_Prod_Slope, LE_Index_Slope,
+  Worked_Hours_PI_Intercepts, LE_PI_Intercepts, PI_stdv, LE_stdv, 
+  FTE_Variance_stdv, LE_Variance_stdv, PI_min_max_range, LE_min_max_range, 
+  FTE_Variance_min_max_range, LE_Variance_min_max_range,
+  PI_percentiles, LE_percentiles
 )
 
-# Metric names for column renaming
+# Updated metric names to match additional data frames
 metric_names <- c(
   "Worked_FTE", "Paid_LE", "Target_Worked_FTE", "Target_LE", 
   "Productivity_Index", "FTE_Variance", "LE_Index", "LE_Variance", 
   "Premium_Pay", "Premium_Pay_pct_Worked_LE", "OT_expense", 
-  "OT_Pay_pct_Worked_LE", "Productivity_Index_med", "FTE_Variance_med", 
-  "LE_Index_med", "LE_Variance_med", "Premium_Pay_med", 
-  "Premium_Pay_pct_Worked_LE_med", "OT_expense_med", "OT_Pay_pct_Worked_LE_med", 
-  "correlation_result"
+  "OT_Pay_pct_Worked_LE", "Productivity_Index_med", "FTE_Variance_med",
+  "Premium_Pay_Variance_med", "LE_Index_med", "LE_Variance_med", 
+  "Premium_Pay_med", "Premium_Pay_pct_Worked_LE_med", "OT_expense_med", 
+  "OT_Pay_pct_Worked_LE_med", 
+  "correlation_result", "Worked_Hours_Prod_Slope", "LE_Index_Slope",
+  "Worked_Hours_PI_Intercepts", "LE_PI_Intercepts", "PI_stdv", "LE_stdv", 
+  "FTE_Variance_stdv", "LE_Variance_stdv", "PI_min_max_range", 
+  "LE_min_max_range", "FTE_Variance_min_max_range", "LE_Variance_min_max_range",
+  "PI_percentiles", "LE_percentiles"
 )
-
-# Function to rename columns for each metric data frame
-rename_columns <- function(df, metric) {
-  # Ensure the data frame has enough columns
-  if (ncol(df) >= 4) {
-    colnames(df)[2:4] <- paste(metric, c("3_Periods", "13_Periods", "26_Periods"), sep = "_")
-  }
-  return(df)
-}
 
 # Apply renaming function to all data frames
 renamed_dfs <- mapply(rename_columns, dfs, metric_names, SIMPLIFY = FALSE)
@@ -410,68 +638,151 @@ renamed_dfs <- mapply(rename_columns, dfs, metric_names, SIMPLIFY = FALSE)
 # Combine data frames using full join by 'Department CODE'
 combined_df <- reduce(renamed_dfs, full_join, by = "Department CODE")
 
-# Desired column order: Group by pay periods
+# Reorder columns to group by pay periods
 new_column_order <- c(
-  "Department CODE", 
-  paste0(metric_names, "_3_Periods"), 
-  paste0(metric_names, "_13_Periods"), 
-  paste0(metric_names, "_26_Periods")
+  "Department CODE",
+  grep("_3_Periods$", names(combined_df), value = TRUE),
+  grep("_13_Periods$", names(combined_df), value = TRUE),
+  grep("_26_Periods$", names(combined_df), value = TRUE)
 )
 
-# Reorder columns
 combined_df <- combined_df %>% select(all_of(new_column_order))
+#---------------TESTING---------------------------------------------
+#-----------Updated Ranking dataframe with corrected rankings------------------
+# Filter out rows where Worked_FTE_3_Periods is NA or 0
+cleaned_df <- combined_df %>%
+  filter(!is.na(Worked_FTE_3_Periods) & Worked_FTE_3_Periods != 0)
 
-# View the final combined data frame
-print(combined_df)
+# Create a dataframe of departments with NA or 0 in Worked_FTE_3_Periods
+na_departments <- combined_df %>%
+  filter(is.na(Worked_FTE_3_Periods) | Worked_FTE_3_Periods == 0) %>%
+  select(`Department CODE`) %>%
+  distinct()
 
-# File Saving -------------------------------------------------------------
-# Writing files or data for storage
-df <- combined_df  
-
-# List of metric df names
-metrics <- c(
-  "Worked_FTE_avg", "Paid_LE_avg", "Target_Worked_FTE_avg", "Target_LE_avg", 
-  "Productivity_Index_avg", "FTE_Variance_avg", "LE_Index_avg", "LE_Variance_avg", 
-  "Premium_Pay_avg", "Premium_Pay_pct_Worked_LE_avg", "OT_expense_avg", 
-  "OT_Pay_pct_Worked_LE_avg", "Productivity_Index_med", "FTE_Variance_med", 
-  "LE_Index_med", "LE_Variance_med", "Premium_Pay_med", 
-  "Premium_Pay_pct_Worked_LE_med", "OT_expense_med", "OT_Pay_pct_Worked_LE_med", 
-  "correlation_result"
+# NA Department List
+list(
+  Cleaned_Data = cleaned_df,
+  NA_Departments = na_departments
 )
 
-#Testing Percent Differences
-percent_diff_df <- data.frame(Department_CODE = df$`Department CODE`)
+# Initialize ranked_df from combined_df
+ranked_df <- cleaned_df
 
-# Function to calculate percentage differences
-calc_percent_diff <- function(x, y) {
-  # Convert to numeric and handle non-numeric values
-  x <- as.numeric(as.character(x))
-  y <- as.numeric(as.character(y))
-  
-  ifelse(is.na(x) | is.na(y) | y == 0, NA, ((x - y) / abs(y)) * 100)
-}
+# List of metrics where lower values are better (DOUBLE CHECK)
+lower_is_better_metrics <- c(
+  "Worked_FTE", "Paid_LE", "FTE_Variance", "LE_Variance", "Premium_Pay", 
+  "Premium_Pay_pct_Worked_LE", "OT_expense", "OT_Pay_pct_Worked_LE",
+  "FTE_Variance_med", "Premium_Pay_Variance_med",
+  "LE_Variance_med", "Premium_Pay_med", "OT_expense_med",
+  "Premium_Pay_pct_Worked_LE_med", "OT_Pay_pct_Worked_LE_med", "PI_stdv",
+  "LE_stdv", "FTE_Variance_stdv", "LE_Variance_stdv", "PI_min_max_range_Range", 
+  "LE_min_max_range_Range", "FTE_Variance_min_max_range_Range", 
+  "LE_Variance_min_max_range_Range", "PI_percentiles_Spread", 
+  "LE_percentiles_Spread")
 
-# Loop through each metric to calculate percentage differences
-for (metric in metrics) {
-  # Define column names for the 3, 13, and 26 period data
-  col_3 <- paste0(metric, "_3_Periods")
-  col_13 <- paste0(metric, "_13_Periods")
-  col_26 <- paste0(metric, "_26_Periods")
-  
-  # Check if all necessary columns exist in the data frame
-  if (all(c(col_3, col_13, col_26) %in% names(df))) 
-    # Calculate percentage differences and add to the new data frame
-    percent_diff_df[[paste0(metric, "_3_vs_13_Periods")]] <- 
-      calc_percent_diff(df[[col_3]], df[[col_13]])
-    
-    percent_diff_df[[paste0(metric, "_13_vs_26_Periods")]] <- 
-      calc_percent_diff(df[[col_13]], df[[col_26]])
+# Adjust column names for 3, 13, and 26 periods
+metrics_columns <- grep("_3_Periods$|_13_Periods$|_26_Periods$", names(ranked_df), value = TRUE)
+lower_is_better_columns <- unlist(lapply(lower_is_better_metrics, function(metric) {
+  grep(paste0("^", metric, "_(3|13|26)_Periods$"), names(ranked_df), value = TRUE)
+}))
+
+# Rank each metric column
+for (metric in metrics_columns) {
+  if (all(is.na(ranked_df[[metric]]))) {
+    # Skip columns with all NA values
+    ranked_df[[paste0(metric, "_rank")]] <- NA
+  } else if (metric %in% lower_is_better_columns) {
+    # Reverse ranking for lower-is-better metrics
+    ranked_df[[paste0(metric, "_rank")]] <- rank(as.numeric(ranked_df[[metric]]), ties.method = "average", na.last = "keep")
   } else {
-    # Warn if the metric columns are missing
-    warning(paste("Missing columns for metric:", metric))
+    # Normal ranking for higher-is-better metrics
+    ranked_df[[paste0(metric, "_rank")]] <- rank(-as.numeric(ranked_df[[metric]]), ties.method = "average", na.last = "keep")
   }
 }
 
-# View the final data frame with percentage differences
-print(percent_diff_df)
+# Update total_rank column
+ranked_df$total_rank <- rowSums(ranked_df[, paste0(metrics_columns, "_rank")], na.rm = TRUE)
+
+# Update total_rank column for the 13 pay period columns only
+ranked_df$total_rank <- rowSums(ranked_df[, grep("_13_Periods_rank$", names(ranked_df))], na.rm = TRUE)
+
+# Remove the original metric columns and keep only the rank columns
+ranked_df <- ranked_df[, grep("_rank$", names(ranked_df))]
+ranked_df <- cbind(`Department CODE` = cleaned_df$`Department CODE`, ranked_df)
+
+# Define subsets of metrics
+productivity_metrics <- c("Productivity_Index", "FTE_Variance", "LE_Index", "LE_Variance")
+premium_pay_metrics <- c("Premium_Pay", "Premium_Pay_pct_Worked_LE", 
+                         "Premium_Pay_med", "Premium_Pay_pct_Worked_LE_med",
+                   "LE_Variance", "Premium_Pay_Variance_med")
+
+#Add in stdv and min/max for FTE Var & LE Var
+spread_metrics <- c("PI_stdv", "LE_stdv", "PI_min_max_range_Range", 
+                    "LE_min_max_range_Range", "correlation_result", 
+                    "FTE_Variance_stdv", "LE_Variance_stdv", 
+                    "FTE_Variance_min_max_range_Range", 
+                    "LE_Variance_min_max_range_Range")
+linear_regression_metrics <- c("Worked_Hours_Prod_Slope", "LE_Index_Slope",
+                               "Worked_Hours_PI_Intercepts", "LE_PI_Intercepts")
+
+
+# Add total rank columns for each subset of metrics with a control for pay period durations
+add_total_rank <- function(metrics, df, subset_name, periods = c(3, 13, 26)) {
+  # Generate rank columns based on selected periods
+  rank_columns <- paste0(metrics, "_", periods, "_Periods_rank")
+  
+  # Sum the ranks for the selected periods
+  df[[paste0(subset_name, "_total_rank")]] <- rowSums(df[, rank_columns], na.rm = TRUE)
+  
+  return(df)
+}
+
+# Apply the function to each subset of metrics with the user-defined periods
+ranked_df <- add_total_rank(productivity_metrics, ranked_df, "productivity", periods = c(3, 13, 26)) # Adjust the periods as needed
+ranked_df <- add_total_rank(premium_pay_metrics, ranked_df, "labor", periods = c(3, 13, 26)) # Adjust the periods as needed
+ranked_df <- add_total_rank(spread_metrics, ranked_df, "spread", periods = c(3, 13, 26)) # Adjust the periods as needed
+ranked_df <- add_total_rank(linear_regression_metrics, ranked_df, "linear_regression", periods = c(3, 13, 26)) # Adjust the periods as needed
+#-------Combining ranked dataframe and metric dataframe-----------------------
+# Perform a left join to append ranked_df to cleaned_df
+final_df <- merge(cleaned_df, ranked_df, by = "Department CODE", all.x = TRUE)
+colnames(final_df) <- trimws(colnames(final_df))
+colnames(department_data) <- trimws(colnames(department_data))
+# Left join to add 'Department DESC' to final_df
+final_df <- left_join(final_df, department_data, by = "Department CODE")
+# Reorder columns to ensure 'Department DESC' is placed after 'Department CODE'
+final_df <- final_df %>%
+  select(`Department CODE`, `Department DESC`, everything())
+
+#------------Adding in binary static and entity volume columns-------------
+static_vol_departments <- static_vol_deps$`Department Definition Code`
+entity_vol_departments <- entity_vol_deps$`Department Definition Code`
+
+# Add the 'Entity Volume' and 'Static Volume' columns to final_df based on conditions
+final_df$Entity_Volume <- ifelse(final_df$`Department CODE` %in% entity_vol_departments, 1, 0)
+final_df$Static_Volume <- ifelse(final_df$`Department CODE` %in% static_vol_departments, 1, 0)
+
+final_df <- final_df %>%
+  left_join(rep_def %>% select(DEFINITION_CODE, SITE, CORPORATE_SERVICE_LINE, VP), 
+            by = c("Department CODE" = "DEFINITION_CODE"))
+
+
+# Define the desired column order
+col_order <- c(
+  "SITE",
+  "CORPORATE_SERVICE_LINE",
+  "VP",
+  "Department CODE", 
+  "Department DESC",
+  "Entity_Volume", 
+  "Static_Volume", 
+  "total_rank", 
+  "productivity_total_rank", 
+  "labor_total_rank", 
+  "spread_total_rank",
+  "linear_regression_total_rank",
+  setdiff(names(final_df), c("Department CODE", "Department DESC", "Entity_Volume", "Static_Volume", "total_rank", "productivity_total_rank", "labor_total_rank", "spread_total_rank"))
+)
+
+# Reorder the columns in final_df
+final_df <- final_df[, col_order]
 # Script End --------------------------------------------------------------
