@@ -448,6 +448,15 @@ Premium_Pay_avg <- calculate_metric_summary(data, "Premium Pay Expense", summary
 # Premium Pay Spend median (OT + Agency)
 Premium_Pay_med <- calculate_metric_summary(data, "Premium Pay Expense", summary_type = "median")
 
+# Premium Pay Hours average (OT + Agency)
+Premium_Pay_hours_avg <- calculate_metric_summary(data, "Premium Pay Hours", summary_type = "mean")
+
+# Premium Pay Hours median (OT + Agency)
+Premium_Pay_hours_med <- calculate_metric_summary(data, "Premium Pay Hours", summary_type = "median")
+
+# Worked Hours average
+Worked_hours_avg <- calculate_metric_summary(data, "Actual Worked Hours", summary_type = "mean")
+
 # Overtime Pay Spend average
 OT_expense_avg <- calculate_metric_summary(data, "Overtime Labor Expense", summary_type = "mean")
 
@@ -460,7 +469,7 @@ Paid_LE_avg <- calculate_metric_summary(data, "Actual Paid Labor Expense", summa
 # Worked LE average (sub-calculation)
 Worked_LE_avg <- calculate_metric_summary(data, "Worked Expenses", summary_type = "mean")
 
-# Premium Pay % of Worked LE Average (NOT PAID)
+# Premium Pay % of Worked LE Average
 Premium_Pay_pct_Worked_LE_avg <- Premium_Pay_avg %>%
   inner_join(Worked_LE_avg, by = "Department CODE") %>%
   mutate(
@@ -472,6 +481,31 @@ Premium_Pay_pct_Worked_LE_avg <- Premium_Pay_avg %>%
 
 # Premium Pay % of Worked LE Median
 Premium_Pay_pct_Worked_LE_med <- calculate_metric_summary(data, "Premium Pay % of Worked LE", summary_type = "median")
+
+# Premium Hours % of Worked Hours Average
+Premium_Hours_pct_Worked_hours <- Premium_Pay_hours_avg %>%
+  inner_join(Worked_hours_avg, by = "Department CODE") %>%
+  mutate(
+    Premium_Hours_Percentage_3_Periods = round((Average_Last_3_Periods.x / Average_Last_3_Periods.y) * 100, 2),
+    Premium_Hours_Percentage_13_Periods = round((Average_Last_13_Periods.x / Average_Last_13_Periods.y) * 100, 2),
+    Premium_Hours_Percentage_26_Periods = round((Average_Last_26_Periods.x / Average_Last_26_Periods.y) * 100, 2)
+  ) %>%
+  select(`Department CODE`, starts_with("Premium_Hours_Percentage"))
+
+
+# Premium Pay FTE Variance from Target Average
+#sub calculations
+Actual_Premium_Pay_FTEs <- calculate_metric_summary(data, "Actual Premium Pay FTEs", summary_type = "mean")
+Premium_Pay_FTEs_Target <- calculate_metric_summary(data, "Premium Pay FTEs Target", summary_type = "mean")
+# Premium Pay FTE Variance from Target: Actual Premium Pay FTEs - Premium Pay FTEs Target
+Premium_Pay_FTE_Variance_calc <- Actual_Premium_Pay_FTEs %>%
+  inner_join(Premium_Pay_FTEs_Target, by = "Department CODE") %>%
+  mutate(
+    Premium_Pay_FTE_Variance_3_Periods = sprintf("%.2f", Average_Last_3_Periods.x - Average_Last_3_Periods.y),
+    Premium_Pay_FTE_Variance_13_Periods = sprintf("%.2f", Average_Last_13_Periods.x - Average_Last_13_Periods.y),
+    Premium_Pay_FTE_Variance_26_Periods = sprintf("%.2f", Average_Last_26_Periods.x - Average_Last_26_Periods.y)
+  ) %>%
+  select(`Department CODE`, starts_with("Premium_Pay_FTE_Variance"))
 
 # OT Pay % of Worked LE Average (NOT PAID)
 OT_Pay_pct_Worked_LE_avg <- OT_expense_avg %>%
@@ -498,14 +532,20 @@ LE_Variance_med <- calculate_metric_summary(data, "Labor Expense Variance", summ
 #FTE Variance Median
 FTE_Variance_med <- calculate_metric_summary(data, "Worked FTE Variance", summary_type = "median")
 
-#Premium Pay Variance Median
-Premium_Pay_Variance_med <- calculate_metric_summary(data, "Premium Pay Variance", summary_type = "median")
+#Premium Pay Expense Variance Median
+Premium_Pay_Variance_med <- calculate_metric_summary(data, "Premium Pay Expense Variance", summary_type = "median")
+
+# Premium Pay FTE Variance Median
+Premium_Pay_FTE_Variance_med <- calculate_metric_summary(data, "Premium Pay FTE Variance", summary_type = "median")
+
+#Premium Pay Expense Variance
+Premium_Pay_Variance <- calculate_metric_summary(data, "Premium Pay Expense Variance", summary_type = "mean")
+
+# Premium Pay FTE Variance
+Premium_Pay_FTE_Variance <- calculate_metric_summary(data, "Premium Pay FTE Variance", summary_type = "mean")
 
 #Worked FTE Average
 Worked_FTE_avg <- calculate_metric_summary(data, "Worked FTE", summary_type = "mean")
-
-#Paid Labor Expense Average
-Paid_LE_avg <- calculate_metric_summary(data, "Actual Paid Labor Expense", summary_type = "mean")
 
 #Target Worked FTE Average
 Target_Worked_FTE_avg <- calculate_metric_summary(data, "Total Target Wrked FTE", summary_type = "mean")
@@ -562,6 +602,8 @@ correlation_result <- calculate_metric_correlation(data, "Actual Measure Amount"
 # Apply function to calculate the slope for Worked Hours Productivity Index
 Worked_Hours_Prod_Slope <- calculate_slope(data, "Worked Hours Productivity Index")
 LE_Index_Slope <- calculate_slope(data, "Labor Expense Index")
+Worked_Hours_FTE_Variance_Slope <- calculate_slope(data, "Worked FTE Variance")
+LE_Variance_Slope <- calculate_slope(data, "Labor Expense Variance")
 
 # Apply function to calculate the linear regression equations for Worked Hours Productivity Index
 Worked_Hours_PI_Regressions <- calculate_regression_equation(data, "Worked Hours Productivity Index")
@@ -613,7 +655,9 @@ dfs <- list(
   Worked_Hours_PI_Intercepts, LE_PI_Intercepts, PI_stdv, LE_stdv, 
   FTE_Variance_stdv, LE_Variance_stdv, PI_min_max_range, LE_min_max_range, 
   FTE_Variance_min_max_range, LE_Variance_min_max_range,
-  PI_percentiles, LE_percentiles
+  PI_percentiles, LE_percentiles, Premium_Hours_pct_Worked_hours,
+  Premium_Pay_hours_avg, Premium_Pay_FTE_Variance_calc, Premium_Pay_Variance,
+  Worked_Hours_FTE_Variance_Slope, LE_Variance_Slope
 )
 
 # Updated metric names to match additional data frames
@@ -629,7 +673,9 @@ metric_names <- c(
   "Worked_Hours_PI_Intercepts", "LE_PI_Intercepts", "PI_stdv", "LE_stdv", 
   "FTE_Variance_stdv", "LE_Variance_stdv", "PI_min_max_range", 
   "LE_min_max_range", "FTE_Variance_min_max_range", "LE_Variance_min_max_range",
-  "PI_percentiles", "LE_percentiles"
+  "PI_percentiles", "LE_percentiles", "Premium_Hours_pct_Worked_Hours", 
+  "Premium_Pay_Hours", "Premium_Pay_FTE_Variance_calc", "Premium_Pay_Variance",
+  "Worked_Hours_FTE_Variance_Slope", "LE_Variance_Slope"
 )
 
 # Apply renaming function to all data frames
@@ -678,7 +724,8 @@ lower_is_better_metrics <- c(
   "LE_stdv", "FTE_Variance_stdv", "LE_Variance_stdv", "PI_min_max_range_Range", 
   "LE_min_max_range_Range", "FTE_Variance_min_max_range_Range", 
   "LE_Variance_min_max_range_Range", "PI_percentiles_Spread", 
-  "LE_percentiles_Spread")
+  "LE_percentiles_Spread", "Premium_Hours_pct_Worked_hours", 
+  "Premium_Pay_FTE_Variance_calc", "Premium_Pay_Variance", "Premium_Pay_Hours")
 
 # Adjust column names for 3, 13, and 26 periods
 metrics_columns <- grep("_3_Periods$|_13_Periods$|_26_Periods$", names(ranked_df), value = TRUE)
@@ -712,18 +759,22 @@ ranked_df <- cbind(`Department CODE` = cleaned_df$`Department CODE`, ranked_df)
 
 # Define subsets of metrics
 productivity_metrics <- c("Productivity_Index", "FTE_Variance", "LE_Index", "LE_Variance")
-premium_pay_metrics <- c("Premium_Pay", "Premium_Pay_pct_Worked_LE", 
-                         "Premium_Pay_med", "Premium_Pay_pct_Worked_LE_med",
-                   "LE_Variance", "Premium_Pay_Variance_med")
 
-#Add in stdv and min/max for FTE Var & LE Var
+premium_pay_metrics <- c("Premium_Pay", "Premium_Pay_Hours", 
+                         "Premium_Hours_pct_Worked_Hours", 
+                         "Premium_Pay_pct_Worked_LE",
+                         "Premium_Pay_FTE_Variance_calc", 
+                         "Premium_Pay_Variance")
+
 spread_metrics <- c("PI_stdv", "LE_stdv", "PI_min_max_range_Range", 
                     "LE_min_max_range_Range", "correlation_result", 
                     "FTE_Variance_stdv", "LE_Variance_stdv", 
                     "FTE_Variance_min_max_range_Range", 
                     "LE_Variance_min_max_range_Range")
+
 linear_regression_metrics <- c("Worked_Hours_Prod_Slope", "LE_Index_Slope",
-                               "Worked_Hours_PI_Intercepts", "LE_PI_Intercepts")
+                               "Worked_Hours_FTE_Variance_Slope", 
+                               "LE_Variance_Slope")
 
 
 # Add total rank columns for each subset of metrics with a control for pay period durations
@@ -731,17 +782,22 @@ add_total_rank <- function(metrics, df, subset_name, periods = c(3, 13, 26)) {
   # Generate rank columns based on selected periods
   rank_columns <- paste0(metrics, "_", periods, "_Periods_rank")
   
-  # Sum the ranks for the selected periods
+  # Calculate the total rank by summing the ranks for the selected periods
   df[[paste0(subset_name, "_total_rank")]] <- rowSums(df[, rank_columns], na.rm = TRUE)
+  
+  # Scale the total rank by dividing by the number of metrics
+  num_metrics <- length(metrics)
+  df[[paste0(subset_name, "_scaled_rank")]] <- df[[paste0(subset_name, "_total_rank")]] / num_metrics
   
   return(df)
 }
 
 # Apply the function to each subset of metrics with the user-defined periods
-ranked_df <- add_total_rank(productivity_metrics, ranked_df, "productivity", periods = c(3, 13, 26)) # Adjust the periods as needed
-ranked_df <- add_total_rank(premium_pay_metrics, ranked_df, "labor", periods = c(3, 13, 26)) # Adjust the periods as needed
-ranked_df <- add_total_rank(spread_metrics, ranked_df, "spread", periods = c(3, 13, 26)) # Adjust the periods as needed
-ranked_df <- add_total_rank(linear_regression_metrics, ranked_df, "linear_regression", periods = c(3, 13, 26)) # Adjust the periods as needed
+ranked_df <- add_total_rank(productivity_metrics, ranked_df, "productivity", periods = c(13)) # Adjust the periods as needed
+ranked_df <- add_total_rank(premium_pay_metrics, ranked_df, "premium_pay", periods = c(13)) # Adjust the periods as needed
+ranked_df <- add_total_rank(spread_metrics, ranked_df, "spread", periods = c(13)) # Adjust the periods as needed
+ranked_df <- add_total_rank(linear_regression_metrics, ranked_df, "linear_regression", periods = c(13)) # Adjust the periods as needed
+
 #-------Combining ranked dataframe and metric dataframe-----------------------
 # Perform a left join to append ranked_df to cleaned_df
 final_df <- merge(cleaned_df, ranked_df, by = "Department CODE", all.x = TRUE)
@@ -776,13 +832,15 @@ col_order <- c(
   "Entity_Volume", 
   "Static_Volume", 
   "total_rank", 
-  "productivity_total_rank", 
-  "labor_total_rank", 
-  "spread_total_rank",
-  "linear_regression_total_rank",
+  "productivity_scaled_rank", 
+  "premium_pay_scaled_rank", 
+  "spread_scaled_rank",
+  "linear_regression_scaled_rank",
   setdiff(names(final_df), c("Department CODE", "Department DESC", "Entity_Volume", "Static_Volume", "total_rank", "productivity_total_rank", "labor_total_rank", "spread_total_rank"))
 )
 
 # Reorder the columns in final_df
+# Remove columns where the name contains ".1"
+final_df <- final_df[, !grepl("\\.1$", colnames(final_df))]
 final_df <- final_df[, col_order]
 # Script End --------------------------------------------------------------
